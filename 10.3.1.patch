@@ -1,0 +1,43 @@
+diff --git a/queue.js b/queue.js
+index d0fbf20..b1037c3 100644
+--- a/queue.js
++++ b/queue.js
+@@ -129,7 +129,11 @@ function fastqueue (context, worker, _concurrency) {
+       }
+     } else {
+       _running++
+-      worker.call(context, current.value, current.worked)
++      try {
++        worker.call(context, current.value, current.worked)
++      } catch (err) {
++        current.worked(err)
++      }
+     }
+   }
+ 
+@@ -153,7 +157,11 @@ function fastqueue (context, worker, _concurrency) {
+       }
+     } else {
+       _running++
+-      worker.call(context, current.value, current.worked)
++      try {
++        worker.call(context, current.value, current.worked)
++      } catch (err) {
++        current.worked(err)
++      }
+     }
+   }
+ 
+@@ -169,7 +177,11 @@ function fastqueue (context, worker, _concurrency) {
+         }
+         queueHead = next.next
+         next.next = null
+-        worker.call(context, next.value, next.worked)
++        try {
++          worker.call(context, next.value, next.worked)
++        } catch (err) {
++          next.worked(err)
++        }
+         if (queueTail === null) {
+           self.empty()
+         }
