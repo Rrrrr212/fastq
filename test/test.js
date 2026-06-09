@@ -175,7 +175,7 @@ test('pause && resume', function (t) {
   queue.resume()
   queue.pause()
   queue.resume()
-  queue.resume() // second resume is a no-op
+  queue.resume()
 
   function worker (arg, cb) {
     t.notOk(queue.paused, 'it should not be paused')
@@ -237,7 +237,7 @@ test('altering concurrency', function (t) {
 
   queue.pause()
 
-  queue.concurrency = 3 // concurrency changes are ignored while paused
+  queue.concurrency = 3
   queue.concurrency = 2
 
   queue.resume()
@@ -247,10 +247,9 @@ test('altering concurrency', function (t) {
   queue.concurrency = 3
 
   t.equal(queue.running(), 3, '3 jobs running')
-
   queue.concurrency = 1
 
-  t.equal(queue.running(), 3, '3 jobs running') // running jobs can't be killed
+  t.equal(queue.running(), 3, '3 jobs running')
 
   queue.push(24, workDone)
   queue.push(24, workDone)
@@ -286,7 +285,6 @@ test('idle()', function (t) {
   queue.push(42, function (err, result) {
     t.error(err, 'no error')
     t.equal(result, true, 'result matches')
-    // it will go idle after executing this function
     setImmediate(function () {
       t.ok(queue.idle(), 'queue is now idle')
     })
@@ -664,17 +662,14 @@ test('abort', function (t) {
     t.fail('drain should never be called')
   }
 
-  // Pause queue to prevent tasks from starting
   queue.pause()
   queue.push(1, doneAborted)
   queue.push(4, doneAborted)
   queue.unshift(3, doneAborted)
   queue.unshift(2, doneAborted)
 
-  // Abort all queued tasks
   queue.abort()
 
-  // Verify state after abort
   t.equal(queue.length(), 0, 'no queued tasks after abort')
   t.equal(queue.drain, predrain, 'drain is back to default')
 
@@ -708,12 +703,10 @@ test('abort with error handler', function (t) {
     errorHandlerCalled++
   })
 
-  // Pause queue to prevent tasks from starting
   queue.pause()
   queue.push(1, doneAborted)
   queue.push(2, doneAborted)
 
-  // Abort all queued tasks
   queue.abort()
 
   setImmediate(function () {
@@ -729,5 +722,40 @@ test('abort with error handler', function (t) {
     setImmediate(function () {
       cb(null, true)
     })
+  }
+})
+
+test('worker throwing synchronously continues processing queued tasks', function (t) {
+  t.plan(8)
+
+  var executed = []
+  var queue = buildQueue(function (task, cb) {
+    executed.push(task)
+
+    if (task === 1) {
+      throw new Error('sync boom')
+    }
+
+    cb(null, task)
+  }, 1)
+
+  queue.error(function (err, task) {
+    t.ok(err instanceof Error, 'global error handler receives thrown error')
+    t.equal(err.message, 'sync boom', 'global error handler receives the thrown message')
+    t.equal(task, 1, 'global error handler receives the failed task')
+  })
+
+  queue.push(1, function (err) {
+    t.ok(err instanceof Error, 'failed task callback receives thrown error')
+    t.equal(err.message, 'sync boom', 'failed task callback receives thrown message')
+  })
+
+  queue.push(2, function (err, result) {
+    t.error(err, 'remaining task continues to run')
+    t.equal(result, 2, 'remaining task completes successfully')
+  })
+
+  queue.drain = function () {
+    t.deepEqual(executed, [1, 2], 'queue continues processing after a thrown error')
   }
 })
