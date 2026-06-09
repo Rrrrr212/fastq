@@ -129,7 +129,7 @@ function fastqueue (context, worker, _concurrency) {
       }
     } else {
       _running++
-      executeTask(current)
+      worker.call(context, current.value, current.worked)
     }
   }
 
@@ -153,7 +153,7 @@ function fastqueue (context, worker, _concurrency) {
       }
     } else {
       _running++
-      executeTask(current)
+      worker.call(context, current.value, current.worked)
     }
   }
 
@@ -169,7 +169,7 @@ function fastqueue (context, worker, _concurrency) {
         }
         queueHead = next.next
         next.next = null
-        executeTask(next)
+        worker.call(context, next.value, next.worked)
         if (queueTail === null) {
           self.empty()
         }
@@ -178,14 +178,6 @@ function fastqueue (context, worker, _concurrency) {
       }
     } else if (--_running === 0) {
       self.drain()
-    }
-  }
-
-  function executeTask (task) {
-    try {
-      worker.call(context, task.value, task.worked)
-    } catch (err) {
-      task.worked(err)
     }
   }
 
@@ -214,16 +206,20 @@ function fastqueue (context, worker, _concurrency) {
       var val = current.value
       var context = current.context
 
+      // Reset the task state
       current.value = null
       current.callback = noop
       current.errorHandler = null
 
+      // Call error handler if present
       if (errorHandler) {
         errorHandler(new Error('abort'), val)
       }
 
+      // Call callback with error
       callback.call(context, new Error('abort'))
 
+      // Release the task back to the pool
       current.release(current)
 
       current = next
@@ -299,6 +295,9 @@ function queueAsPromised (context, worker, _concurrency) {
       })
     })
 
+    // Let's fork the promise chain to
+    // make the error bubble up to the user but
+    // not lead to a unhandledRejection
     p.catch(noop)
 
     return p
@@ -315,6 +314,9 @@ function queueAsPromised (context, worker, _concurrency) {
       })
     })
 
+    // Let's fork the promise chain to
+    // make the error bubble up to the user but
+    // not lead to a unhandledRejection
     p.catch(noop)
 
     return p

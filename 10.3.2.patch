@@ -1,0 +1,199 @@
+diff --git a/queue.js b/queue.js
+index d0fbf20..083415c 100644
+--- a/queue.js
++++ b/queue.js
+@@ -129,7 +129,7 @@ function fastqueue (context, worker, _concurrency) {
+       }
+     } else {
+       _running++
+-      worker.call(context, current.value, current.worked)
++      executeTask(current)
+     }
+   }
+ 
+@@ -153,7 +153,7 @@ function fastqueue (context, worker, _concurrency) {
+       }
+     } else {
+       _running++
+-      worker.call(context, current.value, current.worked)
++      executeTask(current)
+     }
+   }
+ 
+@@ -169,7 +169,7 @@ function fastqueue (context, worker, _concurrency) {
+         }
+         queueHead = next.next
+         next.next = null
+-        worker.call(context, next.value, next.worked)
++        executeTask(next)
+         if (queueTail === null) {
+           self.empty()
+         }
+@@ -181,6 +181,14 @@ function fastqueue (context, worker, _concurrency) {
+     }
+   }
+ 
++  function executeTask (task) {
++    try {
++      worker.call(context, task.value, task.worked)
++    } catch (err) {
++      task.worked(err)
++    }
++  }
++
+   function kill () {
+     queueHead = null
+     queueTail = null
+@@ -206,20 +214,16 @@ function fastqueue (context, worker, _concurrency) {
+       var val = current.value
+       var context = current.context
+ 
+-      // Reset the task state
+       current.value = null
+       current.callback = noop
+       current.errorHandler = null
+ 
+-      // Call error handler if present
+       if (errorHandler) {
+         errorHandler(new Error('abort'), val)
+       }
+ 
+-      // Call callback with error
+       callback.call(context, new Error('abort'))
+ 
+-      // Release the task back to the pool
+       current.release(current)
+ 
+       current = next
+@@ -295,9 +299,6 @@ function queueAsPromised (context, worker, _concurrency) {
+       })
+     })
+ 
+-    // Let's fork the promise chain to
+-    // make the error bubble up to the user but
+-    // not lead to a unhandledRejection
+     p.catch(noop)
+ 
+     return p
+@@ -314,9 +315,6 @@ function queueAsPromised (context, worker, _concurrency) {
+       })
+     })
+ 
+-    // Let's fork the promise chain to
+-    // make the error bubble up to the user but
+-    // not lead to a unhandledRejection
+     p.catch(noop)
+ 
+     return p
+diff --git a/test/test.js b/test/test.js
+index 37e211e..52a2c92 100644
+--- a/test/test.js
++++ b/test/test.js
+@@ -175,7 +175,7 @@ test('pause && resume', function (t) {
+   queue.resume()
+   queue.pause()
+   queue.resume()
+-  queue.resume() // second resume is a no-op
++  queue.resume()
+ 
+   function worker (arg, cb) {
+     t.notOk(queue.paused, 'it should not be paused')
+@@ -237,7 +237,7 @@ test('altering concurrency', function (t) {
+ 
+   queue.pause()
+ 
+-  queue.concurrency = 3 // concurrency changes are ignored while paused
++  queue.concurrency = 3
+   queue.concurrency = 2
+ 
+   queue.resume()
+@@ -247,10 +247,9 @@ test('altering concurrency', function (t) {
+   queue.concurrency = 3
+ 
+   t.equal(queue.running(), 3, '3 jobs running')
+-
+   queue.concurrency = 1
+ 
+-  t.equal(queue.running(), 3, '3 jobs running') // running jobs can't be killed
++  t.equal(queue.running(), 3, '3 jobs running')
+ 
+   queue.push(24, workDone)
+   queue.push(24, workDone)
+@@ -286,7 +285,6 @@ test('idle()', function (t) {
+   queue.push(42, function (err, result) {
+     t.error(err, 'no error')
+     t.equal(result, true, 'result matches')
+-    // it will go idle after executing this function
+     setImmediate(function () {
+       t.ok(queue.idle(), 'queue is now idle')
+     })
+@@ -664,17 +662,14 @@ test('abort', function (t) {
+     t.fail('drain should never be called')
+   }
+ 
+-  // Pause queue to prevent tasks from starting
+   queue.pause()
+   queue.push(1, doneAborted)
+   queue.push(4, doneAborted)
+   queue.unshift(3, doneAborted)
+   queue.unshift(2, doneAborted)
+ 
+-  // Abort all queued tasks
+   queue.abort()
+ 
+-  // Verify state after abort
+   t.equal(queue.length(), 0, 'no queued tasks after abort')
+   t.equal(queue.drain, predrain, 'drain is back to default')
+ 
+@@ -708,12 +703,10 @@ test('abort with error handler', function (t) {
+     errorHandlerCalled++
+   })
+ 
+-  // Pause queue to prevent tasks from starting
+   queue.pause()
+   queue.push(1, doneAborted)
+   queue.push(2, doneAborted)
+ 
+-  // Abort all queued tasks
+   queue.abort()
+ 
+   setImmediate(function () {
+@@ -731,3 +724,38 @@ test('abort with error handler', function (t) {
+     })
+   }
+ })
++
++test('worker throwing synchronously continues processing queued tasks', function (t) {
++  t.plan(8)
++
++  var executed = []
++  var queue = buildQueue(function (task, cb) {
++    executed.push(task)
++
++    if (task === 1) {
++      throw new Error('sync boom')
++    }
++
++    cb(null, task)
++  }, 1)
++
++  queue.error(function (err, task) {
++    t.ok(err instanceof Error, 'global error handler receives thrown error')
++    t.equal(err.message, 'sync boom', 'global error handler receives the thrown message')
++    t.equal(task, 1, 'global error handler receives the failed task')
++  })
++
++  queue.push(1, function (err) {
++    t.ok(err instanceof Error, 'failed task callback receives thrown error')
++    t.equal(err.message, 'sync boom', 'failed task callback receives thrown message')
++  })
++
++  queue.push(2, function (err, result) {
++    t.error(err, 'remaining task continues to run')
++    t.equal(result, 2, 'remaining task completes successfully')
++  })
++
++  queue.drain = function () {
++    t.deepEqual(executed, [1, 2], 'queue continues processing after a thrown error')
++  }
++})
