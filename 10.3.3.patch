@@ -1,0 +1,99 @@
+diff --git a/queue.js b/queue.js
+index d0fbf20..78cc286 100644
+--- a/queue.js
++++ b/queue.js
+@@ -129,7 +129,11 @@ function fastqueue (context, worker, _concurrency) {
+       }
+     } else {
+       _running++
+-      worker.call(context, current.value, current.worked)
++      try {
++        worker.call(context, current.value, current.worked)
++      } catch (err) {
++        current.worked(err)
++      }
+     }
+   }
+ 
+@@ -153,7 +157,11 @@ function fastqueue (context, worker, _concurrency) {
+       }
+     } else {
+       _running++
+-      worker.call(context, current.value, current.worked)
++      try {
++        worker.call(context, current.value, current.worked)
++      } catch (err) {
++        current.worked(err)
++      }
+     }
+   }
+ 
+@@ -169,7 +177,11 @@ function fastqueue (context, worker, _concurrency) {
+         }
+         queueHead = next.next
+         next.next = null
+-        worker.call(context, next.value, next.worked)
++        try {
++          worker.call(context, next.value, next.worked)
++        } catch (err) {
++          next.worked(err)
++        }
+         if (queueTail === null) {
+           self.empty()
+         }
+@@ -267,10 +279,14 @@ function queueAsPromised (context, worker, _concurrency) {
+   }
+ 
+   function asyncWrapper (arg, cb) {
+-    worker.call(this, arg)
+-      .then(function (res) {
+-        cb(null, res)
+-      }, cb)
++    try {
++      worker.call(this, arg)
++        .then(function (res) {
++          cb(null, res)
++        }, cb)
++    } catch (err) {
++      cb(err)
++    }
+   }
+ 
+   var queue = fastqueue(context, asyncWrapper, _concurrency)
+diff --git a/services/logQueue.js b/services/logQueue.js
+new file mode 100644
+index 0000000..90ea94f
+--- /dev/null
++++ b/services/logQueue.js
+@@ -0,0 +1,31 @@
++const fastq = require('../queue');
++
++// Dummy logger for demonstration
++const logger = {
++  error: (msg, err, task) => console.error(msg, err, task),
++  info: (msg) => console.log(msg)
++};
++
++// Worker function
++function worker(task, cb) {
++  try {
++    // Process task
++    if (task.shouldFail) {
++      throw new Error('Worker failed');
++    }
++    logger.info(`Task processed: ${task.id}`);
++    cb(null);
++  } catch (err) {
++    cb(err);
++  }
++}
++
++// Create queue
++const queue = fastq(worker, 1);
++
++// Add global error handler
++queue.error((err, task) => {
++  logger.error('Error processing task in logQueue', err, task);
++});
++
++module.exports = queue;

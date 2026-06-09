@@ -129,11 +129,7 @@ function fastqueue (context, worker, _concurrency) {
       }
     } else {
       _running++
-      try {
-        worker.call(context, current.value, current.worked)
-      } catch (err) {
-        current.worked(err)
-      }
+      worker.call(context, current.value, current.worked)
     }
   }
 
@@ -157,11 +153,7 @@ function fastqueue (context, worker, _concurrency) {
       }
     } else {
       _running++
-      try {
-        worker.call(context, current.value, current.worked)
-      } catch (err) {
-        current.worked(err)
-      }
+      worker.call(context, current.value, current.worked)
     }
   }
 
@@ -177,11 +169,7 @@ function fastqueue (context, worker, _concurrency) {
         }
         queueHead = next.next
         next.next = null
-        try {
-          worker.call(context, next.value, next.worked)
-        } catch (err) {
-          next.worked(err)
-        }
+        worker.call(context, next.value, next.worked)
         if (queueTail === null) {
           self.empty()
         }
@@ -279,14 +267,10 @@ function queueAsPromised (context, worker, _concurrency) {
   }
 
   function asyncWrapper (arg, cb) {
-    try {
-      worker.call(this, arg)
-        .then(function (res) {
-          cb(null, res)
-        }, cb)
-    } catch (err) {
-      cb(err)
-    }
+    worker.call(this, arg)
+      .then(function (res) {
+        cb(null, res)
+      }, cb)
   }
 
   var queue = fastqueue(context, asyncWrapper, _concurrency)
