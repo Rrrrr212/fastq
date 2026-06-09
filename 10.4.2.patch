@@ -1,0 +1,61 @@
+diff --git a/10.4.1.patch b/10.4.1.patch
+new file mode 100644
+index 0000000..54e6093
+--- /dev/null
++++ b/10.4.1.patch
+@@ -0,0 +1,55 @@
++diff --git a/controllers/logController.js b/controllers/logController.js
++--- a/controllers/logController.js
+++++ b/controllers/logController.js
++@@ -1,19 +1,15 @@
++ const { pushLog } = require('../services/logQueue')
++ 
++ const createLog = async (req, res, next) => {
++   try {
++-    pushLog(req.body, (err, result) => {
++-      if (err) {
++-        return next(err)
++-      }
++-
++-      return res.status(202).json({
++-        success: true,
++-        data: result
++-      })
+++    const result = await pushLog(req.body)
+++
+++    return res.status(202).json({
+++      success: true,
+++      data: result
++     })
++   } catch (error) {
++-    next(error)
+++    return next(error)
++   }
++ }
++ 
++ module.exports = { createLog }
++diff --git a/services/logQueue.js b/services/logQueue.js
++--- a/services/logQueue.js
+++++ b/services/logQueue.js
++@@ -1,16 +1,14 @@
++ const fastq = require('fastq')
++ const { saveLog } = require('./logService')
++ 
++-const queue = fastq((payload, done) => {
++-  saveLog(payload)
++-    .then((result) => done(null, result))
++-    .catch(done)
++-}, 1)
+++const queue = fastq.promise(async (payload) => {
+++  return saveLog(payload)
+++}, 1)
++ 
++-function pushLog(payload, done) {
++-  queue.push(payload, done)
+++function pushLog(payload) {
+++  return queue.push(payload)
++ }
++ 
++ module.exports = {
++   pushLog
++ }
