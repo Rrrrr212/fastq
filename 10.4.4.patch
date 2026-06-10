@@ -1,0 +1,89 @@
+diff --git a/controllers/logController.js b/controllers/logController.js
+new file mode 100644
+index 0000000..f48aec1
+--- /dev/null
++++ b/controllers/logController.js
+@@ -0,0 +1,19 @@
++'use strict'
++
++const { pushLog } = require('../services/logQueue')
++
++async function handleLog (req, res) {
++  try {
++    const { level, message, timestamp } = req.body || {}
++
++    const result = await pushLog({ level, message, timestamp })
++
++    res.statusCode = 200
++    res.end(JSON.stringify(result))
++  } catch (err) {
++    res.statusCode = 400
++    res.end(JSON.stringify({ error: err.message }))
++  }
++}
++
++module.exports = { handleLog }
+\ No newline at end of file
+diff --git a/services/logQueue.js b/services/logQueue.js
+new file mode 100644
+index 0000000..f115065
+--- /dev/null
++++ b/services/logQueue.js
+@@ -0,0 +1,56 @@
++'use strict'
++
++const fastq = require('../')
++
++const CONCURRENCY = 4
++
++const queue = fastq.promise(worker, CONCURRENCY)
++
++async function worker (entry) {
++  if (!entry || !entry.level || !entry.message) {
++    throw new Error('Invalid log entry: level and message are required')
++  }
++
++  const timestamp = entry.timestamp || new Date().toISOString()
++  const line = `${timestamp} [${entry.level.toUpperCase()}] ${entry.message}`
++
++  console.log(line)
++  return { ok: true, timestamp }
++}
++
++function pushLog (entry) {
++  return queue.push(entry)
++}
++
++function drained () {
++  return queue.drained()
++}
++
++function idle () {
++  return queue.idle()
++}
++
++function length () {
++  return queue.length()
++}
++
++function pause () {
++  queue.pause()
++}
++
++function resume () {
++  queue.resume()
++}
++
++queue.error((err, task) => {
++  console.error('Log worker error:', err.message, 'task:', task)
++})
++
++module.exports = {
++  pushLog,
++  drained,
++  idle,
++  length,
++  pause,
++  resume
++}
+\ No newline at end of file
