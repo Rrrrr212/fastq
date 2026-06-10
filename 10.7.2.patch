@@ -1,0 +1,390 @@
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000..cd74715
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,23 @@
++FROM node:20-alpine
++
++WORKDIR /usr/src/app
++
++COPY package*.json ./
++RUN npm install --omit=dev
++
++COPY . .
++RUN mkdir -p /usr/src/app/logs
++
++ENV NODE_ENV=production \
++    PORT=3000 \
++    LOG_DIR=/usr/src/app/logs \
++    LOG_FILE=service.log \
++    REDIS_URL=redis://redis:6379 \
++    REDIS_QUEUE_KEY=fastq:logs:pending \
++    REDIS_PROCESSING_KEY=fastq:logs:processing \
++    QUEUE_CONCURRENCY=4 \
++    QUEUE_PREFETCH=4
++
++EXPOSE 3000
++
++CMD ["npm", "run", "start:log-service"]
+diff --git a/deploy/docker-compose.yml b/deploy/docker-compose.yml
+new file mode 100644
+index 0000000..ca2c2d7
+--- /dev/null
++++ b/deploy/docker-compose.yml
+@@ -0,0 +1,38 @@
++services:
++  log-service:
++    build:
++      context: ..
++      dockerfile: Dockerfile
++    restart: unless-stopped
++    ports:
++      - "${LOG_SERVICE_PORT:-3000}:3000"
++    environment:
++      NODE_ENV: production
++      PORT: 3000
++      LOG_DIR: /usr/src/app/logs
++      LOG_FILE: service.log
++      REDIS_URL: redis://redis:6379
++      REDIS_QUEUE_KEY: fastq:logs:pending
++      REDIS_PROCESSING_KEY: fastq:logs:processing
++      QUEUE_CONCURRENCY: 4
++      QUEUE_PREFETCH: 4
++    volumes:
++      - ./logs:/usr/src/app/logs
++    depends_on:
++      redis:
++        condition: service_healthy
++
++  redis:
++    image: redis:7-alpine
++    restart: unless-stopped
++    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
++    healthcheck:
++      test: ["CMD", "redis-cli", "ping"]
++      interval: 5s
++      timeout: 3s
++      retries: 10
++    volumes:
++      - redis-data:/data
++
++volumes:
++  redis-data:
+diff --git a/log-service.js b/log-service.js
+new file mode 100644
+index 0000000..845750e
+--- /dev/null
++++ b/log-service.js
+@@ -0,0 +1,289 @@
++'use strict'
++
++const crypto = require('node:crypto')
++const fastq = require('./')
++const http = require('node:http')
++const path = require('node:path')
++const { appendFile, mkdir } = require('node:fs/promises')
++const { createClient } = require('redis')
++
++const PORT = parsePositiveInteger(process.env.PORT, 3000)
++const QUEUE_CONCURRENCY = parsePositiveInteger(process.env.QUEUE_CONCURRENCY, 4)
++const QUEUE_PREFETCH = Math.max(parsePositiveInteger(process.env.QUEUE_PREFETCH, QUEUE_CONCURRENCY), QUEUE_CONCURRENCY)
++const LOG_DIR = process.env.LOG_DIR || path.join(process.cwd(), 'logs')
++const REDIS_URL = process.env.REDIS_URL || 'redis://redis:6379'
++const REDIS_QUEUE_KEY = process.env.REDIS_QUEUE_KEY || 'fastq:logs:pending'
++const REDIS_PROCESSING_KEY = process.env.REDIS_PROCESSING_KEY || 'fastq:logs:processing'
++const DEFAULT_LOG_FILE = sanitizeLogFile(process.env.LOG_FILE || 'service.log')
++
++let isScheduling = false
++let isShuttingDown = false
++let server
++
++const redis = createClient({
++  url: REDIS_URL,
++  socket: {
++    reconnectStrategy: function (retries) {
++      return Math.min(retries * 100, 1000)
++    }
++  }
++})
++
++redis.on('error', function (err) {
++  console.error('redis error', err)
++})
++
++const queue = fastq.promise(writeLogEntry, QUEUE_CONCURRENCY)
++
++queue.error(function (err, job) {
++  console.error('queue worker error', err, job && job.id)
++})
++
++queue.drain = function () {
++  if (!isShuttingDown) {
++    void scheduleFromRedis()
++  }
++}
++
++async function start () {
++  await mkdir(LOG_DIR, { recursive: true })
++  await redis.connect()
++  await recoverProcessingQueue()
++  await scheduleFromRedis()
++
++  server = http.createServer(handleRequest)
++  server.listen(PORT, function () {
++    console.log(`log service listening on ${PORT}`)
++  })
++}
++
++async function handleRequest (req, res) {
++  if (req.method === 'GET' && req.url === '/healthz') {
++    await writeJson(res, 200, {
++      status: 'ok',
++      running: queue.running(),
++      buffered: queue.length(),
++      pending: await redis.lLen(REDIS_QUEUE_KEY),
++      processing: await redis.lLen(REDIS_PROCESSING_KEY)
++    })
++    return
++  }
++
++  if (req.method === 'POST' && req.url === '/logs') {
++    try {
++      const body = await readJsonBody(req)
++      const job = createJob(body)
++      await redis.rPush(REDIS_QUEUE_KEY, JSON.stringify(job))
++      await scheduleFromRedis()
++      await writeJson(res, 202, {
++        accepted: true,
++        id: job.id,
++        pending: await redis.lLen(REDIS_QUEUE_KEY)
++      })
++    } catch (err) {
++      const statusCode = err && err.statusCode ? err.statusCode : 500
++      const message = err && err.message ? err.message : 'internal server error'
++      await writeJson(res, statusCode, { error: message })
++    }
++    return
++  }
++
++  await writeJson(res, 404, { error: 'not found' })
++}
++
++function createJob (body) {
++  const payload = typeof body === 'string' ? { message: body } : body
++  const message = payload && typeof payload.message === 'string' ? payload.message.trim() : ''
++
++  if (!message) {
++    const error = new Error('message is required')
++    error.statusCode = 400
++    throw error
++  }
++
++  const source = payload.source ? String(payload.source).trim() : 'app'
++
++  return {
++    id: crypto.randomUUID(),
++    timestamp: new Date().toISOString(),
++    level: normalizeLogLevel(payload.level),
++    source: source || 'app',
++    file: sanitizeLogFile(payload.file || DEFAULT_LOG_FILE),
++    message: message.replace(/\r?\n/g, '\\n')
++  }
++}
++
++async function writeLogEntry (job) {
++  const filePath = path.join(LOG_DIR, sanitizeLogFile(job.file || DEFAULT_LOG_FILE))
++  await appendFile(filePath, formatLogEntry(job) + '\n', 'utf8')
++  await redis.lRem(REDIS_PROCESSING_KEY, 1, job.raw)
++}
++
++async function scheduleFromRedis () {
++  if (isScheduling || isShuttingDown) {
++    return
++  }
++
++  isScheduling = true
++
++  try {
++    while (!isShuttingDown && queue.running() + queue.length() < QUEUE_PREFETCH) {
++      const raw = await redis.lMove(REDIS_QUEUE_KEY, REDIS_PROCESSING_KEY, 'LEFT', 'RIGHT')
++
++      if (!raw) {
++        break
++      }
++
++      let payload
++
++      try {
++        payload = JSON.parse(raw)
++      } catch (err) {
++        console.error('invalid queued payload discarded', err)
++        await redis.lRem(REDIS_PROCESSING_KEY, 1, raw)
++        continue
++      }
++
++      queue.push({
++        id: payload.id,
++        timestamp: payload.timestamp,
++        level: payload.level,
++        source: payload.source,
++        file: payload.file,
++        message: payload.message,
++        raw
++      }).catch(function (err) {
++        return requeueJob(raw, err)
++      })
++    }
++  } finally {
++    isScheduling = false
++  }
++}
++
++async function recoverProcessingQueue () {
++  const stuckJobs = await redis.lRange(REDIS_PROCESSING_KEY, 0, -1)
++
++  if (stuckJobs.length === 0) {
++    return
++  }
++
++  const multi = redis.multi()
++  multi.del(REDIS_PROCESSING_KEY)
++  multi.lPush(REDIS_QUEUE_KEY, ...stuckJobs.reverse())
++  await multi.exec()
++}
++
++async function requeueJob (raw, err) {
++  console.error('failed to process log job', err)
++  const multi = redis.multi()
++  multi.lRem(REDIS_PROCESSING_KEY, 1, raw)
++  multi.lPush(REDIS_QUEUE_KEY, raw)
++  await multi.exec()
++  if (!isShuttingDown) {
++    void scheduleFromRedis()
++  }
++}
++
++function formatLogEntry (job) {
++  return `${job.timestamp} [${job.level}] [${job.source}] ${job.message}`
++}
++
++function normalizeLogLevel (level) {
++  const normalized = level ? String(level).trim().toUpperCase() : 'INFO'
++  return normalized || 'INFO'
++}
++
++function sanitizeLogFile (fileName) {
++  const input = String(fileName || 'service.log').trim()
++  const baseName = path.basename(input)
++  const safeName = baseName.replace(/[^a-zA-Z0-9._-]/g, '-')
++  return safeName || 'service.log'
++}
++
++function parsePositiveInteger (value, defaultValue) {
++  const parsed = Number.parseInt(value, 10)
++  return Number.isInteger(parsed) && parsed > 0 ? parsed : defaultValue
++}
++
++function readJsonBody (req) {
++  return new Promise(function (resolve, reject) {
++    let body = ''
++
++    req.setEncoding('utf8')
++    req.on('data', function (chunk) {
++      body += chunk
++      if (body.length > 1024 * 1024) {
++        const error = new Error('request body too large')
++        error.statusCode = 413
++        reject(error)
++        req.destroy()
++      }
++    })
++    req.on('end', function () {
++      if (body.length === 0) {
++        const error = new Error('request body is required')
++        error.statusCode = 400
++        reject(error)
++        return
++      }
++
++      try {
++        resolve(JSON.parse(body))
++      } catch (err) {
++        err.statusCode = 400
++        reject(err)
++      }
++    })
++    req.on('error', reject)
++  })
++}
++
++function writeJson (res, statusCode, payload) {
++  return new Promise(function (resolve) {
++    res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' })
++    res.end(JSON.stringify(payload), resolve)
++  })
++}
++
++async function shutdown (signal) {
++  if (isShuttingDown) {
++    return
++  }
++
++  isShuttingDown = true
++  console.log(`received ${signal}, shutting down`)
++
++  if (server) {
++    await new Promise(function (resolve) {
++      server.close(resolve)
++    })
++  }
++
++  const deadline = Date.now() + 5000
++  while ((queue.running() > 0 || queue.length() > 0) && Date.now() < deadline) {
++    await new Promise(function (resolve) {
++      setTimeout(resolve, 100)
++    })
++  }
++
++  try {
++    await redis.quit()
++  } catch (err) {
++    console.error('redis quit failed', err)
++    redis.disconnect()
++  }
++}
++
++process.on('SIGINT', function () {
++  void shutdown('SIGINT')
++})
++
++process.on('SIGTERM', function () {
++  void shutdown('SIGTERM')
++})
++
++start().catch(function (err) {
++  console.error('unable to start log service', err)
++  process.exitCode = 1
++})
+diff --git a/package.json b/package.json
+index 9e1d9dd..4869b39 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,8 @@
+     "test:report": "npm run lint && npm run unit:report",
+     "test": "npm run lint && npm run unit",
+     "typescript": "tsc --project ./test/tsconfig.json",
+-    "legacy": "tape test/test.js"
++    "legacy": "tape test/test.js",
++    "start:log-service": "node log-service.js"
+   },
+   "pre-commit": [
+     "test",
+@@ -44,6 +45,7 @@
+     "typescript": "^5.0.4"
+   },
+   "dependencies": {
++    "redis": "^4.7.1",
+     "reusify": "^1.0.4"
+   }
+ }
