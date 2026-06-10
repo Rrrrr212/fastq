@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: fastq-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - fastq-net
+
+  log-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: fastq-log-service
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - LOG_DIR=/app/logs
+      - PORT=3000
+      - CONCURRENCY=4
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - fastq-net
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  fastq-net:
+    driver: bridge

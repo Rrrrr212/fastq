@@ -44,6 +44,7 @@
     "typescript": "^5.0.4"
   },
   "dependencies": {
+    "ioredis": "^5.4.0",
     "reusify": "^1.0.4"
   }
 }
