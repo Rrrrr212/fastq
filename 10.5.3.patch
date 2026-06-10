@@ -1,0 +1,96 @@
+diff --git a/config/queueConfig.js b/config/queueConfig.js
+new file mode 100644
+index 0000000..800ebf8
+--- /dev/null
++++ b/config/queueConfig.js
+@@ -0,0 +1,6 @@
++module.exports = {
++  defaultConcurrency: 3,
++  highConcurrency: 10,
++  thresholdHigh: 100,
++  thresholdLow: 20
++};
+diff --git a/services/logQueue.js b/services/logQueue.js
+new file mode 100644
+index 0000000..894e875
+--- /dev/null
++++ b/services/logQueue.js
+@@ -0,0 +1,51 @@
++const fastq = require('../queue');
++const config = require('../config/queueConfig');
++
++// 模拟的日志处理 worker
++async function logWorker(task) {
++  // 在此处处理日志
++  return Promise.resolve();
++}
++
++// 包装 worker 以便在任务完成后检查并发
++async function wrappedWorker(task) {
++  try {
++    return await logWorker(task);
++  } finally {
++    checkConcurrency();
++  }
++}
++
++// 创建 promise 队列
++const queue = fastq.promise(wrappedWorker, config.defaultConcurrency);
++
++// 动态调整并发数逻辑
++function checkConcurrency() {
++  const pending = queue.length();
++  
++  if (pending > config.thresholdHigh && queue.concurrency !== config.highConcurrency) {
++    queue.concurrency = config.highConcurrency;
++    // console.log(`[logQueue] 任务积压超过 ${config.thresholdHigh}，并发提升至 ${config.highConcurrency}`);
++  } else if (pending < config.thresholdLow && queue.concurrency !== config.defaultConcurrency) {
++    queue.concurrency = config.defaultConcurrency;
++    // console.log(`[logQueue] 任务积压低于 ${config.thresholdLow}，并发恢复至 ${config.defaultConcurrency}`);
++  }
++}
++
++// 拦截 push 方法，在入队时也能触发检查
++const originalPush = queue.push.bind(queue);
++queue.push = function(task) {
++  const result = originalPush(task);
++  checkConcurrency();
++  return result;
++};
++
++// 拦截 unshift 方法
++const originalUnshift = queue.unshift.bind(queue);
++queue.unshift = function(task) {
++  const result = originalUnshift(task);
++  checkConcurrency();
++  return result;
++};
++
++module.exports = queue;
+diff --git a/test-logQueue.js b/test-logQueue.js
+new file mode 100644
+index 0000000..293b5f7
+--- /dev/null
++++ b/test-logQueue.js
+@@ -0,0 +1,21 @@
++const queue = require('./services/logQueue');
++
++async function test() {
++  console.log('Initial concurrency:', queue.concurrency);
++  
++  // Push 105 tasks
++  for (let i = 0; i < 105; i++) {
++    queue.push({ id: i });
++  }
++  
++  console.log('After pushing 105 tasks, concurrency:', queue.concurrency);
++  console.log('Pending tasks:', queue.length());
++  
++  // Wait for tasks to drain
++  await queue.drained();
++  
++  console.log('After draining, concurrency:', queue.concurrency);
++  console.log('Pending tasks:', queue.length());
++}
++
++test().catch(console.error);
