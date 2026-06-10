@@ -1,0 +1,38 @@
+services:
+  log-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${LOG_SERVICE_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      LOG_DIR: /usr/src/app/logs
+      LOG_FILE: service.log
+      REDIS_URL: redis://redis:6379
+      REDIS_QUEUE_KEY: fastq:logs:pending
+      REDIS_PROCESSING_KEY: fastq:logs:processing
+      QUEUE_CONCURRENCY: 4
+      QUEUE_PREFETCH: 4
+    volumes:
+      - ./logs:/usr/src/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
