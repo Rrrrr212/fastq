@@ -1,0 +1,255 @@
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 0000000..6f9a148
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,23 @@
++FROM node:20-alpine
++
++WORKDIR /app
++
++COPY package.json ./
++
++RUN npm install --omit=dev
++
++COPY queue.js ./
++COPY server.js ./
++
++RUN mkdir -p /app/logs
++
++VOLUME ["/app/logs"]
++
++EXPOSE 3000
++
++ENV NODE_ENV=production
++ENV LOG_DIR=/app/logs
++ENV PORT=3000
++ENV CONCURRENCY=4
++
++CMD ["node", "server.js"]
+\ No newline at end of file
+diff --git a/deploy/docker-compose.yml b/deploy/docker-compose.yml
+new file mode 100644
+index 0000000..3e3e0f5
+--- /dev/null
++++ b/deploy/docker-compose.yml
+@@ -0,0 +1,52 @@
++version: '3.8'
++
++services:
++  redis:
++    image: redis:7-alpine
++    container_name: fastq-redis
++    restart: unless-stopped
++    command: >
++      redis-server
++      --appendonly yes
++      --appendfsync everysec
++      --save 900 1
++      --save 300 10
++      --save 60 10000
++    volumes:
++      - redis-data:/data
++    healthcheck:
++      test: ["CMD", "redis-cli", "ping"]
++      interval: 5s
++      timeout: 3s
++      retries: 5
++    networks:
++      - fastq-net
++
++  log-service:
++    build:
++      context: ..
++      dockerfile: Dockerfile
++    container_name: fastq-log-service
++    restart: unless-stopped
++    ports:
++      - "3000:3000"
++    environment:
++      - REDIS_URL=redis://redis:6379
++      - LOG_DIR=/app/logs
++      - PORT=3000
++      - CONCURRENCY=4
++    volumes:
++      - ./logs:/app/logs
++    depends_on:
++      redis:
++        condition: service_healthy
++    networks:
++      - fastq-net
++
++volumes:
++  redis-data:
++    driver: local
++
++networks:
++  fastq-net:
++    driver: bridge
+\ No newline at end of file
+diff --git a/package.json b/package.json
+index 9e1d9dd..dddc310 100644
+--- a/package.json
++++ b/package.json
+@@ -44,6 +44,7 @@
+     "typescript": "^5.0.4"
+   },
+   "dependencies": {
++    "ioredis": "^5.4.0",
+     "reusify": "^1.0.4"
+   }
+ }
+diff --git a/server.js b/server.js
+new file mode 100644
+index 0000000..3b919a5
+--- /dev/null
++++ b/server.js
+@@ -0,0 +1,147 @@
++'use strict'
++
++const fastq = require('./')
++const Redis = require('ioredis')
++const fs = require('fs')
++const path = require('path')
++
++const LOG_DIR = process.env.LOG_DIR || './logs'
++const REDIS_URL = process.env.REDIS_URL || 'redis://redis:6379'
++const PORT = process.env.PORT || 3000
++const CONCURRENCY = parseInt(process.env.CONCURRENCY || '4', 10)
++
++const REDIS_PENDING_KEY = 'fastq:pending'
++
++const redis = new Redis(REDIS_URL)
++
++if (!fs.existsSync(LOG_DIR)) {
++  fs.mkdirSync(LOG_DIR, { recursive: true })
++}
++
++function writeLogEntry(task, cb) {
++  const logFile = path.join(LOG_DIR, `app-${new Date().toISOString().slice(0, 10)}.log`)
++  const line = JSON.stringify({
++    ts: new Date().toISOString(),
++    level: task.level || 'info',
++    message: task.message,
++    meta: task.meta || {}
++  }) + '\n'
++
++  fs.appendFile(logFile, line, (err) => {
++    if (err) return cb(err)
++    redis.lrem(REDIS_PENDING_KEY, 0, JSON.stringify(task), (redisErr) => {
++      cb(redisErr)
++    })
++  })
++}
++
++const queue = fastq(writeLogEntry, CONCURRENCY)
++
++function enqueue(task) {
++  return new Promise((resolve, reject) => {
++    const taskStr = JSON.stringify(task)
++    redis.rpush(REDIS_PENDING_KEY, taskStr, (err) => {
++      if (err) return reject(err)
++      queue.push(task, (workerErr, result) => {
++        if (workerErr) return reject(workerErr)
++        resolve(result)
++      })
++    })
++  })
++}
++
++function recoverPendingTasks() {
++  return new Promise((resolve, reject) => {
++    redis.lrange(REDIS_PENDING_KEY, 0, -1, (err, items) => {
++      if (err) return reject(err)
++
++      if (!items || items.length === 0) {
++        console.log('No pending tasks to recover')
++        return resolve(0)
++      }
++
++      let count = 0
++      items.forEach((item) => {
++        try {
++          const task = JSON.parse(item)
++          queue.push(task, (workerErr) => {
++            if (workerErr) {
++              console.error('Failed to process recovered task:', workerErr.message)
++            }
++          })
++          count++
++        } catch (parseErr) {
++          console.error('Failed to parse pending task:', parseErr.message)
++          redis.lrem(REDIS_PENDING_KEY, 0, item)
++        }
++      })
++
++      console.log(`Recovered ${count} pending tasks from Redis`)
++      resolve(count)
++    })
++  })
++}
++
++const http = require('http')
++
++const server = http.createServer(async (req, res) => {
++  if (req.method === 'GET' && req.url === '/health') {
++    res.writeHead(200, { 'Content-Type': 'application/json' })
++    res.end(JSON.stringify({
++      status: 'ok',
++      queueLength: queue.length(),
++      running: queue.running(),
++      idle: queue.idle()
++    }))
++    return
++  }
++
++  if (req.method === 'POST' && req.url === '/logs') {
++    let body = ''
++    req.on('data', (chunk) => { body += chunk })
++    req.on('end', async () => {
++      try {
++        const task = JSON.parse(body)
++        await enqueue(task)
++        res.writeHead(202, { 'Content-Type': 'application/json' })
++        res.end(JSON.stringify({ accepted: true }))
++      } catch (err) {
++        res.writeHead(400, { 'Content-Type': 'application/json' })
++        res.end(JSON.stringify({ error: err.message }))
++      }
++    })
++    return
++  }
++
++  res.writeHead(404, { 'Content-Type': 'application/json' })
++  res.end(JSON.stringify({ error: 'not found' }))
++})
++
++recoverPendingTasks()
++  .then(() => {
++    server.listen(PORT, () => {
++      console.log(`Log service listening on port ${PORT}`)
++    })
++  })
++  .catch((err) => {
++    console.error('Failed to recover pending tasks:', err)
++    process.exit(1)
++  })
++
++process.on('SIGTERM', () => {
++  console.log('SIGTERM received, draining queue...')
++  queue.killAndDrain()
++  server.close(() => {
++    redis.quit()
++    process.exit(0)
++  })
++})
++
++process.on('SIGINT', () => {
++  console.log('SIGINT received, draining queue...')
++  queue.killAndDrain()
++  server.close(() => {
++    redis.quit()
++    process.exit(0)
++  })
++})
+\ No newline at end of file
