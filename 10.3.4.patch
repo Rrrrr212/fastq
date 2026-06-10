@@ -1,0 +1,24 @@
+diff --git a/services/logQueue.js b/services/logQueue.js
+new file mode 100644
+index 0000000..f80f234
+--- /dev/null
++++ b/services/logQueue.js
+@@ -0,0 +1,17 @@
++'use strict'
++
++var queue = require('../queue')
++
++var concurrency = 4
++
++var logQueue = queue(worker, concurrency)
++
++function worker (logEntry, cb) {
++  process.stdout.write(JSON.stringify(logEntry) + '\n', cb)
++}
++
++logQueue.error(function (err, logEntry) {
++  console.error('[logQueue] worker error:', err && err.message, 'logEntry:', logEntry)
++})
++
++module.exports = logQueue
+\ No newline at end of file
