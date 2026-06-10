@@ -1,0 +1,64 @@
+diff --git a/config/queueConfig.js b/config/queueConfig.js
+new file mode 100644
+index 0000000..cdcddf4
+--- /dev/null
++++ b/config/queueConfig.js
+@@ -0,0 +1,8 @@
++'use strict'
++
++module.exports = {
++  baseConcurrency: 3,
++  highConcurrency: 10,
++  scaleUpThreshold: 100,
++  scaleDownThreshold: 20
++}
+diff --git a/services/logQueue.js b/services/logQueue.js
+new file mode 100644
+index 0000000..d23b1d9
+--- /dev/null
++++ b/services/logQueue.js
+@@ -0,0 +1,44 @@
++'use strict'
++
++var fastqueue = require('../queue')
++var config = require('../config/queueConfig')
++
++var queue = fastqueue(logWorker, config.baseConcurrency)
++
++var scaledUp = false
++
++function logWorker (task, cb) {
++  cb(null, task)
++}
++
++function adjustConcurrency () {
++  var pending = queue.length()
++
++  if (!scaledUp && pending > config.scaleUpThreshold) {
++    queue.concurrency = config.highConcurrency
++    scaledUp = true
++  } else if (scaledUp && pending < config.scaleDownThreshold) {
++    queue.concurrency = config.baseConcurrency
++    scaledUp = false
++  }
++}
++
++var originalPush = queue.push
++queue.push = function pushWithAdjust (value, done) {
++  originalPush.call(queue, value, done)
++  adjustConcurrency()
++}
++
++var originalUnshift = queue.unshift
++queue.unshift = function unshiftWithAdjust (value, done) {
++  originalUnshift.call(queue, value, done)
++  adjustConcurrency()
++}
++
++var originalDrain = queue.drain
++queue.drain = function drainWithAdjust () {
++  if (typeof originalDrain === 'function') originalDrain()
++  adjustConcurrency()
++}
++
++module.exports = queue
