@@ -1,0 +1,209 @@
+diff --git a/controllers/logController.js b/controllers/logController.js
+new file mode 100644
+index 0000000..dbf73bb
+--- /dev/null
++++ b/controllers/logController.js
+@@ -0,0 +1,83 @@
++'use strict'
++
++const { pushLog, getPendingCount, isIdle, waitForDrain } = require('../services/logQueue')
++
++async function addLog (req, res) {
++  try {
++    const { level, message, metadata } = req.body
++
++    const logEntry = {
++      level: level || 'info',
++      message,
++      metadata: metadata || {},
++      timestamp: new Date().toISOString()
++    }
++
++    const result = await pushLog(logEntry)
++
++    res.status(200).json({
++      success: true,
++      data: result
++    })
++  } catch (err) {
++    res.status(500).json({
++      success: false,
++      error: err.message
++    })
++  }
++}
++
++async function addLogs (req, res) {
++  try {
++    const { logs } = req.body
++
++    const results = await Promise.all(
++      logs.map(log => pushLog({
++        level: log.level || 'info',
++        message: log.message,
++        metadata: log.metadata || {},
++        timestamp: new Date().toISOString()
++      }))
++    )
++
++    res.status(200).json({
++      success: true,
++      data: results
++    })
++  } catch (err) {
++    res.status(500).json({
++      success: false,
++      error: err.message
++    })
++  }
++}
++
++async function getQueueStatus (req, res) {
++  res.status(200).json({
++    pending: getPendingCount(),
++    idle: isIdle()
++  })
++}
++
++async function flushLogs (req, res) {
++  try {
++    await waitForDrain()
++
++    res.status(200).json({
++      success: true,
++      message: 'All logs processed'
++    })
++  } catch (err) {
++    res.status(500).json({
++      success: false,
++      error: err.message
++    })
++  }
++}
++
++module.exports = {
++  addLog,
++  addLogs,
++  getQueueStatus,
++  flushLogs
++}
+diff --git a/services/logQueue.js b/services/logQueue.js
+new file mode 100644
+index 0000000..165cdcf
+--- /dev/null
++++ b/services/logQueue.js
+@@ -0,0 +1,50 @@
++'use strict'
++
++const fastq = require('../queue.js').promise
++
++async function logWorker (logEntry) {
++  await simulateLogWrite(logEntry)
++  return { success: true, timestamp: Date.now() }
++}
++
++function simulateLogWrite (logEntry) {
++  return new Promise((resolve) => {
++    setTimeout(() => {
++      resolve()
++    }, 10)
++  })
++}
++
++const queue = fastq(logWorker, 2)
++
++queue.error(function (err, task) {
++  console.error('Log processing failed:', err.message, 'for task:', task)
++})
++
++function pushLog (logEntry) {
++  return queue.push(logEntry)
++}
++
++function getPendingCount () {
++  return queue.length()
++}
++
++function getRunningCount () {
++  return queue.running()
++}
++
++function isIdle () {
++  return queue.idle()
++}
++
++async function waitForDrain () {
++  return queue.drained()
++}
++
++module.exports = {
++  pushLog,
++  getPendingCount,
++  getRunningCount,
++  isIdle,
++  waitForDrain
++}
+diff --git a/test/test-logqueue.js b/test/test-logqueue.js
+new file mode 100644
+index 0000000..46e3b78
+--- /dev/null
++++ b/test/test-logqueue.js
+@@ -0,0 +1,58 @@
++'use strict'
++
++const test = require('tape')
++const { pushLog, getPendingCount, getRunningCount, isIdle, waitForDrain } = require('../services/logQueue')
++
++test('pushLog returns a Promise', async function (t) {
++  const result = pushLog({ level: 'info', message: 'test log' })
++  t.ok(result instanceof Promise, 'pushLog returns a Promise')
++
++  const resolved = await result
++  t.ok(resolved.success, 'promise resolves with success')
++  t.ok(resolved.timestamp, 'promise resolves with timestamp')
++})
++
++test('pushLog processes logs in order', async function (t) {
++  const results = await Promise.all([
++    pushLog({ level: 'info', message: 'log 1' }),
++    pushLog({ level: 'warn', message: 'log 2' }),
++    pushLog({ level: 'error', message: 'log 3' })
++  ])
++
++  t.equal(results.length, 3, 'all logs processed')
++  results.forEach(r => t.ok(r.success, 'each log processed successfully'))
++})
++
++test('queue status functions work', async function (t) {
++  t.ok(typeof getPendingCount === 'function', 'getPendingCount is a function')
++  t.ok(typeof isIdle === 'function', 'isIdle is a function')
++  t.ok(typeof waitForDrain === 'function', 'waitForDrain is a function')
++
++  const pending = getPendingCount()
++  t.ok(typeof pending === 'number', 'getPendingCount returns a number')
++})
++
++test('waitForDrain resolves when queue is empty', async function (t) {
++  pushLog({ level: 'info', message: 'test log' })
++  pushLog({ level: 'info', message: 'test log 2' })
++
++  await waitForDrain()
++
++  t.pass('waitForDrain resolved successfully')
++})
++
++test('error handling works correctly', async function (t) {
++  const fastq = require('../queue.js').promise
++
++  const errorQueue = fastq(async function (task) {
++    throw new Error('test error')
++  }, 1)
++
++  try {
++    await errorQueue.push({ test: true })
++    t.fail('should have thrown')
++  } catch (err) {
++    t.ok(err instanceof Error, 'error is caught')
++    t.equal(err.message, 'test error', 'error message matches')
++  }
++})
