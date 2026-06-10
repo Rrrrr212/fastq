@@ -1,0 +1,63 @@
+diff --git a/controllers/logController.js b/controllers/logController.js
+new file mode 100644
+index 0000000..189a408
+--- /dev/null
++++ b/controllers/logController.js
+@@ -0,0 +1,26 @@
++const { pushLog } = require('../services/logQueue');
++
++/**
++ * 日志处理控制器
++ * 简化了调用代码，直接使用 async/await 处理 Promise
++ */
++async function handleLogRequest(req, res) {
++  try {
++    const logData = req.body;
++    
++    // 使用 await 直接等待 Promise 结果，避免了回调地狱
++    const result = await pushLog(logData);
++    
++    res.status(200).json({ 
++      message: 'Log processed successfully', 
++      result 
++    });
++  } catch (error) {
++    console.error('Error processing log:', error);
++    res.status(500).json({ error: 'Internal Server Error' });
++  }
++}
++
++module.exports = {
++  handleLogRequest
++};
+diff --git a/services/logQueue.js b/services/logQueue.js
+new file mode 100644
+index 0000000..dfd77f8
+--- /dev/null
++++ b/services/logQueue.js
+@@ -0,0 +1,25 @@
++const fastq = require('fastq');
++
++// Promise 风格的 worker 任务处理函数
++async function worker(logData) {
++  // 模拟日志处理逻辑
++  console.log('Processing log:', logData);
++  return { success: true, data: logData };
++}
++
++// 使用 fastq.promise 创建队列，并发度设为 1
++const queue = fastq.promise(worker, 1);
++
++/**
++ * 将日志推入队列
++ * 由于使用了 fastq.promise，queue.push 会直接返回一个 Promise
++ * @param {Object} logData - 日志数据
++ * @returns {Promise}
++ */
++function pushLog(logData) {
++  return queue.push(logData);
++}
++
++module.exports = {
++  pushLog
++};
