@@ -1,0 +1,164 @@
+diff --git a/__tests__/logQueue.test.js b/__tests__/logQueue.test.js
+new file mode 100644
+index 0000000..15de7a9
+--- /dev/null
++++ b/__tests__/logQueue.test.js
+@@ -0,0 +1,74 @@
++'use strict'
++
++jest.mock('fs')
++
++var createLogQueue = require('../services/logQueue')
++var fs = require('fs')
++
++describe('logQueue', function () {
++  var logQueue
++
++  beforeEach(function () {
++    jest.clearAllMocks()
++  })
++
++  test('pushLog should write log entry to file', function (done) {
++    fs.appendFile.mockImplementation(function (_filePath, _data, cb) {
++      cb(null)
++    })
++
++    logQueue = createLogQueue('/tmp/test.log')
++
++    logQueue.pushLog('test message', function (err) {
++      expect(err).toBeNull()
++      expect(fs.appendFile).toHaveBeenCalledWith(
++        '/tmp/test.log',
++        'test message\n',
++        expect.any(Function)
++      )
++      done()
++    })
++  })
++
++  test('error handler should be called when task fails', function (done) {
++    var writeError = new Error('write failed')
++
++    fs.appendFile.mockImplementation(function (_filePath, _data, cb) {
++      cb(writeError)
++    })
++
++    logQueue = createLogQueue('/tmp/test.log')
++
++    logQueue.error(function (err, logEntry) {
++      expect(err).toBe(writeError)
++      expect(logEntry).toBe('error log')
++      done()
++    })
++
++    logQueue.pushLog('error log', function (err) {
++      expect(err).toBe(writeError)
++    })
++  })
++
++  test('queue.drain should be triggered after all tasks complete', function (done) {
++    fs.appendFile.mockImplementation(function (_filePath, _data, cb) {
++      cb(null)
++    })
++
++    logQueue = createLogQueue('/tmp/test.log')
++    var logs = ['log1', 'log2', 'log3']
++    var completed = 0
++
++    logQueue.drain(function () {
++      expect(completed).toBe(3)
++      done()
++    })
++
++    logs.forEach(function (log) {
++      logQueue.pushLog(log, function (err) {
++        expect(err).toBeNull()
++        completed++
++      })
++    })
++  })
++})
+\ No newline at end of file
+diff --git a/package.json b/package.json
+index 9e1d9dd..9c52d6b 100644
+--- a/package.json
++++ b/package.json
+@@ -10,6 +10,7 @@
+     "coverage": "nyc --reporter=html --reporter=cobertura --reporter=text tape test/test.js test/promise.js",
+     "test:report": "npm run lint && npm run unit:report",
+     "test": "npm run lint && npm run unit",
++    "test:jest": "jest",
+     "typescript": "tsc --project ./test/tsconfig.json",
+     "legacy": "tape test/test.js"
+   },
+@@ -36,6 +37,7 @@
+   "devDependencies": {
+     "async": "^3.1.0",
+     "eslint": "^9.36.0",
++    "jest": "^29.0.0",
+     "neo-async": "^2.6.1",
+     "neostandard": "^0.12.2",
+     "nyc": "^17.0.0",
+@@ -45,5 +47,10 @@
+   },
+   "dependencies": {
+     "reusify": "^1.0.4"
++  },
++  "jest": {
++    "testMatch": [
++      "**/__tests__/**/*.test.js"
++    ]
+   }
+-}
++}
+\ No newline at end of file
+diff --git a/services/logQueue.js b/services/logQueue.js
+new file mode 100644
+index 0000000..ca7c0b0
+--- /dev/null
++++ b/services/logQueue.js
+@@ -0,0 +1,43 @@
++'use strict'
++
++var fastqueue = require('../')
++var fs = require('fs')
++
++function createLogQueue (filePath, opts) {
++  if (!opts) opts = {}
++  var concurrency = opts.concurrency >= 1 ? opts.concurrency : 1
++
++  var queue = fastqueue(function worker (logEntry, cb) {
++    var line = typeof logEntry === 'object'
++      ? JSON.stringify(logEntry) + '\n'
++      : String(logEntry) + '\n'
++
++    try {
++      fs.appendFile(filePath, line, function (err) {
++        cb(err || null)
++      })
++    } catch (syncErr) {
++      cb(syncErr)
++    }
++  }, concurrency)
++
++  return {
++    pushLog: function pushLog (logEntry, done) {
++      queue.push(logEntry, done)
++    },
++
++    drain: function drain (cb) {
++      queue.drain = cb
++    },
++
++    error: function error (handler) {
++      queue.error(handler)
++    },
++
++    get queue () {
++      return queue
++    }
++  }
++}
++
++module.exports = createLogQueue
+\ No newline at end of file
